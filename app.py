@@ -8,8 +8,6 @@ import tempfile
 import streamlit as st
 
 from src.config import (
-    DEFAULT_DEEPSEEK_MODEL,
-    DEFAULT_GROQ_MODEL,
     GROQ_LIMIT_ERROR,
     GROQ_REQUEST_TOO_LARGE,
     LLM_INSUFFICIENT_BALANCE,
@@ -18,19 +16,17 @@ from src.config import (
     PIPELINE_ALL_SEGMENTS_FAILED,
     SHOW_ALTERNATE_LLM_PROVIDERS,
     TARGET_QUESTIONS_TOTAL,
-    deepseek_model_display_name,
 )
 from src.excel_export import dataframe_to_excel, questions_to_dataframe
 from src.generator import QuestionType, detect_lang
-from src.llm_client import GROQ_MODEL_LABELS, deepseek_balance_status, groq_quota_status
 from src.loaders import load_text
 from src.pipeline import generate_from_document
 
 ProviderChoice = str
 
 PROVIDER_OPTIONS: dict[ProviderChoice, str] = {
-    "deepseek": f"{deepseek_model_display_name()} — {DEFAULT_DEEPSEEK_MODEL}",
-    "groq": f"Qwen (Groq) — {GROQ_MODEL_LABELS.get(DEFAULT_GROQ_MODEL, DEFAULT_GROQ_MODEL)}",
+    "deepseek": "الافتراضي",
+    "groq": "احتياطي",
 }
 DEFAULT_PROVIDER: ProviderChoice = "deepseek"
 DIFFICULTY = "Hard"
@@ -122,251 +118,122 @@ def init_state() -> None:
         "questions_df": None,
         "last_filename": None,
         "segment_count": 0,
-        "last_progress_log": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def fetch_groq_quota(api_key: str) -> dict:
-    return groq_quota_status(api_key)
+_PIPELINE_PHASES: list[tuple[str, str]] = [
+    ("extract", "استخراج النص من الملف"),
+    ("chunk", "تقسيم المستند"),
+    ("generate", "توليد الأسئلة"),
+    ("merge", "دمج النتائج"),
+    ("validate", "التحقق من الأسئلة"),
+    ("select", "اختيار الأسئلة المناسبة"),
+    ("done", "اكتمل التوليد"),
+]
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def fetch_deepseek_balance(api_key: str) -> dict:
-    return deepseek_balance_status(api_key)
-
-
-def format_deepseek_balance_line(status: dict) -> str:
-    if not status.get("ok"):
-        return "تعذّر جلب الرصيد"
-    total = status.get("total_balance")
-    currency = status.get("currency", "USD")
-    if not total:
-        return "غير متاح"
-    symbol = "$" if currency == "USD" else ""
-    suffix = currency if currency != "USD" else "USD"
-    if status.get("is_available") is False:
-        return f"{symbol}{total} {suffix} — غير كافٍ"
-    return f"{symbol}{total} {suffix} متبقٍ"
-
-
-def format_quota_line(model: dict) -> str:
-    remaining = model.get("remaining_requests")
-    limit = model.get("limit_requests")
-    if remaining is not None and limit is not None:
-        return f"{remaining}/{limit} طلب متبقٍ"
-    if model.get("available"):
-        return "متاح"
-    return "غير متاح"
-
-
-def provider_model_label(provider: str) -> str:
-    if provider == "deepseek":
-        return f"{deepseek_model_display_name()} ({DEFAULT_DEEPSEEK_MODEL})"
-    if provider == "groq":
-        return f"{GROQ_MODEL_LABELS.get(DEFAULT_GROQ_MODEL, DEFAULT_GROQ_MODEL)} (Groq)"
-    return provider
-
-
-def format_pipeline_progress_line(stage: str, data: dict) -> str:
+def _stage_phase_key(stage: str) -> str:
     if stage == "extract_done":
-        lang = data.get("lang", "?")
-        return f"① استخراج النص: {data.get('text_chars', 0):,} حرف — اللغة: {lang}"
+        return "extract"
     if stage == "chunking":
-        sampled = " (عيّنة)" if data.get("segments_sampled") else ""
-        target = data.get("target_questions", TARGET_QUESTIONS_TOTAL)
-        return (
-            f"② تقسيم **منطقي** للمستند: {data.get('segments_total', 0)} جزء — "
-            f"يُرسَل {data.get('segments_used', 0)} جزء للنموذج{sampled} "
-            f"(هدف {target} سؤالاً إجمالاً)"
-        )
-    if stage == "segment_llm_start":
-        seg_q = data.get("segment_questions")
-        per_part = f" — {seg_q} سؤال/جزء" if seg_q else ""
-        return (
-            f"③ [{data.get('index')}/{data.get('total')}] "
-            f"النموذج يولّد أسئلة — {provider_model_label(str(data.get('provider', '')))}"
-            f"{per_part} — {data.get('segment_chars', 0):,} حرف…"
-        )
-    if stage == "segment_llm_done":
-        return (
-            f"   ✓ [{data.get('index')}/{data.get('total')}] "
-            f"ردّ النموذج: {data.get('mcq_count', 0)} سؤال MCQ"
-        )
-    if stage == "segment_skip":
-        return f"   ⚠ [{data.get('index')}/{data.get('total')}] تخطّي الجزء (JSON أو خطأ مزود)"
-    if stage == "merge":
-        return (
-            f"④ دمج النتائج: {data.get('mcq_raw', 0)} سؤال من "
-            f"{data.get('segment_payloads', 0)} جزء"
-        )
-    if stage == "merge_done":
-        return f"   إزالة التكرار → {data.get('mcq_after_dedupe', 0)} سؤال"
+        return "chunk"
+    if stage in {"segment_llm_start", "segment_llm_done", "segment_skip"}:
+        return "generate"
+    if stage in {"merge", "merge_done"}:
+        return "merge"
     if stage == "validate":
-        return f"⑤ التحقق من الأسئلة مقابل المستند ({data.get('mcq_before_filter', 0)} قبل الفلترة)…"
+        return "validate"
     if stage == "cap":
-        return (
-            f"⑥ اختيار أفضل {data.get('target_questions', TARGET_QUESTIONS_TOTAL)} سؤالاً "
-            f"مع تنوع (حساب/تحليل) من {data.get('mcq_before_cap', 0)} مرشّح"
-        )
+        return "select"
     if stage == "done":
-        return (
-            f"⑦ اكتمل — {data.get('mcq_final', 0)} سؤال صالح "
-            f"({provider_model_label(str(data.get('provider_used', '')))})"
-        )
-    return f"{stage}: {data}"
+        return "done"
+    return "generate"
 
 
 def pipeline_status_headline(stage: str, data: dict) -> str:
-    if stage == "extract_done":
-        return "استخراج النص من الملف…"
-    if stage == "chunking":
-        return f"تقسيم المستند إلى {data.get('segments_used', 0)} جزء…"
-    if stage == "segment_llm_start":
-        return (
-            f"النموذج يعمل — الجزء {data.get('index')} من {data.get('total')} "
-            f"({provider_model_label(str(data.get('provider', '')))})"
-        )
-    if stage in {"segment_llm_done", "segment_skip"}:
-        return f"الجزء {data.get('index')} من {data.get('total')} — متابعة…"
-    if stage in {"merge", "merge_done"}:
-        return "دمج الأسئلة وإزالة التكرار…"
-    if stage == "validate":
-        return "التحقق من جودة الأسئلة…"
-    if stage == "cap":
-        return f"اختيار أفضل {TARGET_QUESTIONS_TOTAL} سؤالاً…"
-    if stage == "done":
-        return "اكتمل التوليد"
-    return "جاري التوليد…"
+    del data
+    labels = dict(_PIPELINE_PHASES)
+    phase = _stage_phase_key(stage)
+    label = labels.get(phase, "جاري التوليد")
+    if phase == "done":
+        return label
+    return f"{label}…"
+
+
+def _render_phase_checklist(completed: set[str], current: str) -> str:
+    rows: list[str] = []
+    for key, label in _PIPELINE_PHASES:
+        if key in completed:
+            rows.append(f"✓ {html.escape(label)}")
+        elif key == current:
+            rows.append(f"▸ {html.escape(label)}…")
+        else:
+            rows.append(f"○ {html.escape(label)}")
+    return (
+        "<div class='rtl-block' style='font-size:0.95rem;line-height:1.9;color:#334155'>"
+        + "<br>".join(rows)
+        + "</div>"
+    )
 
 
 def make_pipeline_progress_ui():
-    lines: list[str] = []
+    completed_phases: set[str] = set()
+    current_phase = "extract"
     log_box = st.empty()
     progress_bar = st.progress(0.0)
+    order = [p[0] for p in _PIPELINE_PHASES]
+
+    log_box.markdown(_render_phase_checklist(completed_phases, current_phase), unsafe_allow_html=True)
 
     def callback(stage: str, data: dict) -> None:
-        lines.append(format_pipeline_progress_line(stage, data))
+        nonlocal current_phase
+        phase = _stage_phase_key(stage)
+        if phase in order:
+            idx = order.index(phase)
+            for earlier in order[:idx]:
+                completed_phases.add(earlier)
+            current_phase = phase
         log_box.markdown(
-            "<div class='rtl-block' style='font-size:0.88rem;line-height:1.6;color:#334155'>"
-            + "<br>".join(html.escape(line) for line in lines)
-            + "</div>",
+            _render_phase_checklist(completed_phases, current_phase),
             unsafe_allow_html=True,
         )
         if stage == "chunking":
-            progress_bar.progress(0.08)
-        elif stage == "segment_llm_start":
+            progress_bar.progress(0.12)
+        elif stage in {"segment_llm_start", "segment_llm_done", "segment_skip"}:
             index = int(data.get("index") or 1)
             total = max(1, int(data.get("total") or 1))
-            # Most time is spent waiting on the model per segment.
-            progress_bar.progress(0.08 + 0.75 * (index - 1) / total)
-        elif stage == "segment_llm_done":
-            index = int(data.get("index") or 1)
-            total = max(1, int(data.get("total") or 1))
-            progress_bar.progress(0.08 + 0.75 * index / total)
-        elif stage == "merge":
-            progress_bar.progress(0.88)
+            progress_bar.progress(0.12 + 0.58 * index / total)
+        elif stage in {"merge", "merge_done"}:
+            progress_bar.progress(0.78)
         elif stage == "validate":
-            progress_bar.progress(0.94)
+            progress_bar.progress(0.88)
         elif stage == "cap":
-            progress_bar.progress(0.97)
+            progress_bar.progress(0.94)
         elif stage == "done":
-            progress_bar.progress(1.0)
-
-    return callback, lines, progress_bar
-
-
-def render_provider_status(selected_provider: ProviderChoice) -> None:
-    if selected_provider == "deepseek":
-        deepseek_key = get_deepseek_api_key()
-        primary_label = html.escape(provider_model_label("deepseek"))
-
-        if not deepseek_key:
-            st.markdown(
-                '<div class="model-status">⚠️ <strong>DeepSeek:</strong> مفتاح API غير مهيأ أو فارغ — '
-                "افتح <code>.streamlit/secrets.toml</code>، ضع المفتاح، "
-                "<strong>احفظ الملف (Ctrl+S)</strong>، ثم أعد تشغيل التطبيق.</div>",
+            completed_phases.update(order)
+            current_phase = "done"
+            log_box.markdown(
+                _render_phase_checklist(completed_phases, "done"),
                 unsafe_allow_html=True,
             )
-            return
+            progress_bar.progress(1.0)
 
-        balance = fetch_deepseek_balance(deepseek_key)
-        balance_line = html.escape(format_deepseek_balance_line(balance))
+    return callback, progress_bar
 
-        st.markdown(
-            (
-                f'<div class="model-status">'
-                f"📌 <strong>النموذج المختار:</strong> {primary_label}<br>"
-                f"💰 <strong>رصيد DeepSeek:</strong> {balance_line}"
-                f"</div>"
-            ),
-            unsafe_allow_html=True,
-        )
+def render_provider_status(selected_provider: ProviderChoice) -> None:
+    key_ok = (
+        get_deepseek_api_key()
+        if selected_provider == "deepseek"
+        else get_groq_api_key()
+    )
+    if key_ok:
         return
-
-    if selected_provider != "groq":
-        return
-
-    api_key = get_groq_api_key()
-    if not api_key:
-        st.markdown(
-            '<div class="model-status">⚠️ <strong>Groq:</strong> مفتاح API غير مهيأ</div>',
-            unsafe_allow_html=True,
-        )
-        return
-
-    status = fetch_groq_quota(api_key)
-    if not status.get("ok") or not status.get("models"):
-        st.markdown(
-            '<div class="model-status">⚠️ <strong>Groq:</strong> تعذّر التحقق من حالة النموذج</div>',
-            unsafe_allow_html=True,
-        )
-        return
-
-    primary = status["models"][0]
-    primary_label = html.escape(primary["label"])
-    primary_quota = html.escape(format_quota_line(primary))
-
-    if primary.get("available"):
-        limit_text = "لم يصل للحد بعد"
-        if primary.get("remaining_requests") == 0:
-            limit_text = "وصل الحد اليومي"
-        st.markdown(
-            (
-                f'<div class="model-status">'
-                f"🤖 <strong>النموذج:</strong> {primary_label} (Groq)<br>"
-                f"📊 <strong>الحد اليومي:</strong> {primary_quota} — {limit_text}"
-                f"</div>"
-            ),
-            unsafe_allow_html=True,
-        )
-        return
-
-    fallback = next((model for model in status["models"][1:] if model.get("available")), None)
-    if fallback:
-        fallback_label = html.escape(fallback["label"])
-        fallback_quota = html.escape(format_quota_line(fallback))
-        st.markdown(
-            (
-                f'<div class="model-status">'
-                f"🤖 <strong>النموذج الأساسي:</strong> {primary_label} — وصل الحد اليومي<br>"
-                f"🔄 <strong>الاحتياطي:</strong> {fallback_label} — {fallback_quota} — لم يصل للحد بعد"
-                f"</div>"
-            ),
-            unsafe_allow_html=True,
-        )
-        return
-
     st.markdown(
-        (
-            f'<div class="model-status">'
-            f"🤖 <strong>النموذج:</strong> {primary_label} (Groq)<br>"
-            f"⛔ <strong>الحد اليومي:</strong> تم استنفاد الحد لجميع النماذج — حاول لاحقاً"
-            f"</div>"
-        ),
+        '<div class="model-status">⚠️ خدمة التوليد غير مهيّأة. '
+        "تواصل مع مسؤول النظام.</div>",
         unsafe_allow_html=True,
     )
 
@@ -430,7 +297,7 @@ st.markdown(
 selected_provider: ProviderChoice = DEFAULT_PROVIDER
 if SHOW_ALTERNATE_LLM_PROVIDERS:
     selected_provider = st.radio(
-        "اختر النموذج",
+        "مصدر التوليد",
         options=list(PROVIDER_OPTIONS.keys()),
         index=list(PROVIDER_OPTIONS.keys()).index(DEFAULT_PROVIDER),
         format_func=lambda key: PROVIDER_OPTIONS[key],
@@ -448,12 +315,12 @@ if st.button("توليد الأسئلة", type="primary", use_container_width=Tr
     if selected_provider == "deepseek":
         api_key = deepseek_key
         if not api_key:
-            st.error("مفتاح DeepSeek غير مهيأ. أضف DEEPSEEK_API_KEY في secrets.toml.")
+            st.error("خدمة التوليد غير مهيّأة. تواصل مع مسؤول النظام.")
             st.stop()
     else:
         api_key = groq_key
         if not api_key:
-            st.error("مفتاح Groq غير مهيأ. أضف GROQ_API_KEY في secrets.toml.")
+            st.error("خدمة التوليد غير مهيّأة. تواصل مع مسؤول النظام.")
             st.stop()
 
     if not uploaded:
@@ -461,7 +328,7 @@ if st.button("توليد الأسئلة", type="primary", use_container_width=Tr
         st.stop()
 
     with st.status("جاري توليد الأسئلة…", expanded=True) as run_status:
-        progress_cb, progress_lines, _progress_bar = make_pipeline_progress_ui()
+        progress_cb, _progress_bar = make_pipeline_progress_ui()
         suffix = os.path.splitext(uploaded.name)[1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(uploaded.getbuffer())
@@ -502,19 +369,19 @@ if st.button("توليد الأسئلة", type="primary", use_container_width=Tr
                 message = str(exc)
                 if message == LLM_INSUFFICIENT_BALANCE:
                     st.error(
-                        "انتهى رصيد DeepSeek. يرجى شحن الرصيد من platform.deepseek.com "
-                        "ثم المحاولة مرة أخرى. (لا يتم التبديل تلقائياً إلى Qwen أو Llama.)"
+                        "تعذّر إكمال التوليد (انتهى الرصيد أو الحد المتاح). "
+                        "حاول لاحقاً أو تواصل مع مسؤول النظام."
                     )
                 elif message == PIPELINE_ALL_SEGMENTS_FAILED:
                     st.error(
                         "تعذّر توليد أسئلة من جميع أجزاء المستند. "
-                        "تحقق من رصيد/حد المزود المختار أو جرّب ملفاً أصغر."
+                        "جرّب ملفاً أصغر أو حاول لاحقاً."
                     )
                 elif message in {GROQ_LIMIT_ERROR, LLM_LIMIT_ERROR}:
-                    st.error("تم استنفاد حد المزود. حاول لاحقاً.")
+                    st.error("تم استنفاد الحد المتاح. حاول لاحقاً.")
                 elif message in {GROQ_REQUEST_TOO_LARGE, LLM_REQUEST_TOO_LARGE}:
                     st.error(
-                        "تعذّر معالجة بعض أجزاء المستند ضمن حد المزود. "
+                        "تعذّر معالجة بعض أجزاء المستند. "
                         "جرّب مرة أخرى — النظام يقسّم المستند تلقائياً."
                     )
                 else:
@@ -523,7 +390,7 @@ if st.button("توليد الأسئلة", type="primary", use_container_width=Tr
             except json.JSONDecodeError:
                 run_status.update(label="فشل — JSON", state="error")
                 st.error(
-                    "تعذّر قراءة نتيجة النموذج (JSON). "
+                    "تعذّر قراءة نتيجة التوليد. "
                     "جرّب مرة أخرى. حجم الملف بالميغا ليس المشكلة — المهم حجم النص المستخرج."
                 )
                 st.stop()
@@ -532,37 +399,25 @@ if st.button("توليد الأسئلة", type="primary", use_container_width=Tr
             st.session_state["questions_df"] = df
             st.session_state["last_filename"] = os.path.splitext(uploaded.name)[0]
             st.session_state["run_meta"] = run_meta
-            st.session_state["last_progress_log"] = list(progress_lines)
             run_status.update(label=pipeline_status_headline("done", {"mcq_final": len(df)}), state="complete")
         finally:
             os.unlink(tmp_path)
 
-    if st.session_state.get("last_progress_log"):
-        with st.expander("سجل التوليد (Debug)", expanded=False):
-            st.markdown(
-                "<div class='rtl-block' style='font-size:0.88rem;line-height:1.6'>"
-                + "<br>".join(html.escape(line) for line in st.session_state["last_progress_log"])
-                + "</div>",
-                unsafe_allow_html=True,
-            )
-
     count = len(st.session_state["questions_df"]) if st.session_state["questions_df"] is not None else 0
     meta = st.session_state.get("run_meta") or {}
-    model_used = provider_model_label(str(meta.get("provider_used", selected_provider)))
     if meta:
         skipped = meta.get("segments_skipped", 0)
         skipped_line = f" — تخطّي {skipped} جزء." if skipped else ""
         st.caption(
-            f"🤖 النموذج: {model_used} — "
             f"النص: {meta.get('text_chars', 0):,} حرف — "
-            f"{meta.get('segments_used', 0)} جزء منطقي — "
+            f"{meta.get('segments_used', 0)} جزء — "
             f"هدف {meta.get('target_questions', TARGET_QUESTIONS_TOTAL)} سؤال "
             f"(ظهر {count}).{skipped_line}"
         )
     if count == 0:
         st.warning("لم يُولَّد أي سؤال صالح من هذا المستند.")
     else:
-        st.success(f"تم توليد {count} سؤالاً صالحاً — النموذج: {model_used}")
+        st.success(f"تم توليد {count} سؤالاً صالحاً")
 
 if st.session_state["questions_df"] is not None and not st.session_state["questions_df"].empty:
     st.markdown('<h2 class="questions-header">الأسئلة</h2>', unsafe_allow_html=True)
