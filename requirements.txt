@@ -1,0 +1,11 @@
+streamlit>=1.32.0
+openai>=1.40.0
+huggingface_hub>=0.26.0
+pandas
+openpyxl
+pdfplumber
+pymupdf
+Pillow
+pytesseract
+python-docx
+langdetect
