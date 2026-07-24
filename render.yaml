@@ -1,11 +1,15 @@
 # Render Blueprint — https://render.com/docs/blueprint-spec
-# Deploy: Dashboard → New → Blueprint → connect repo, or `render blueprint apply`
+# First deploy: Dashboard → New → Blueprint → connect GitHub repo (main).
+# Auto-deploy: each push to `main` rebuilds and redeploys (see autoDeployTrigger).
+# Secrets: set DEEPSEEK_API_KEY in Render Environment only — never commit secrets.toml.
 services:
   - type: web
     name: edu-question-generator
     runtime: python
     plan: free
     region: frankfurt
+    branch: main
+    autoDeployTrigger: commit
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: >-
       streamlit run app.py
