@@ -23,7 +23,6 @@ def questions_to_dataframe(payload: dict, default_difficulty: str = "Medium") ->
                 "Option D": options[3] if len(options) > 3 else "",
                 "Answer": item.get("answer", ""),
                 "Solution": item.get("solution") or item.get("explanation", ""),
-                "Difficulty": item.get("difficulty", default_difficulty),
             }
         )
         counter += 1
@@ -46,7 +45,6 @@ def questions_to_dataframe(payload: dict, default_difficulty: str = "Medium") ->
                 "Option D": "",
                 "Answer": answer_text,
                 "Solution": item.get("solution") or item.get("explanation", ""),
-                "Difficulty": item.get("difficulty", default_difficulty),
             }
         )
         counter += 1
@@ -64,7 +62,6 @@ def questions_to_dataframe(payload: dict, default_difficulty: str = "Medium") ->
                 "Option D": "",
                 "Answer": item.get("answer", ""),
                 "Solution": item.get("solution") or item.get("explanation", ""),
-                "Difficulty": item.get("difficulty", default_difficulty),
             }
         )
         counter += 1
@@ -80,7 +77,6 @@ def questions_to_dataframe(payload: dict, default_difficulty: str = "Medium") ->
         "Option D",
         "Answer",
         "Solution",
-        "Difficulty",
     ]
     if not rows:
         return pd.DataFrame(columns=columns)
