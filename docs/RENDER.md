@@ -84,7 +84,8 @@ git push origin main
 |---------|------|
 | «خدمة التوليد غير مهيّأة» | أضف `DEEPSEEK_API_KEY` في Environment → Save → انتظر Deploy |
 | لا ينشر بعد push | تحقق من Auto-Deploy وفرع `main` وصلاحيات تطبيق Render على GitHub |
-| WebSocket / الصفحة لا تفتح | `enableXsrfProtection = false` في `.streamlit/config.toml` (موجود) |
+| WebSocket / الصفحة لا تفتح | `enableXsrfProtection = false` و `enableWebsocketCompression = false` في `.streamlit/config.toml` (موجود)؛ أعد Deploy |
+| صفحة بيضاء + عنوان Streamlit فقط | انتظر 30–60 ث بعد «cold start»؛ جرّb متصفحاً آخر بدون مانع إعلانات؛ F12 → Console ابحث عن `_stcore/stream` |
 | Build فشل | `requirements.txt` و `runtime.txt` / `PYTHON_VERSION=3.11.9` |
 | 502 بعد انتظار طويل | Free tier + مهلة الطلب؛ جرّب ملفاً أصغر |
 
