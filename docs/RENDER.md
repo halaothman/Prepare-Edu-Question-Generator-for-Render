@@ -67,11 +67,7 @@ git push origin main
 | `LLM_PROVIDER` | `deepseek` |
 | `DEEPSEEK_MODEL` | `deepseek-chat` |
 | `DEEPSEEK_API_KEY` | *(Secret — من لوحة Render فقط)* |
-| `AUTO_FALLBACK_TO_GROQ` | `false` |
-| `SHOW_ALTERNATE_LLM_PROVIDERS` | `false` |
 | `TARGET_QUESTIONS_TOTAL` | `20` |
-
-(اختياري) `GROQ_API_KEY` إذا فعّلت مزوداً احتياطياً لاحقاً.
 
 ## 4) مشاركة الرابط
 

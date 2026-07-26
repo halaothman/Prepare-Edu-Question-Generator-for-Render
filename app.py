@@ -8,13 +8,10 @@ import tempfile
 import streamlit as st
 
 from src.config import (
-    GROQ_LIMIT_ERROR,
-    GROQ_REQUEST_TOO_LARGE,
     LLM_INSUFFICIENT_BALANCE,
     LLM_LIMIT_ERROR,
     LLM_REQUEST_TOO_LARGE,
     PIPELINE_ALL_SEGMENTS_FAILED,
-    SHOW_ALTERNATE_LLM_PROVIDERS,
     TARGET_QUESTIONS_TOTAL,
 )
 from src.excel_export import dataframe_to_excel, questions_to_dataframe
@@ -22,13 +19,6 @@ from src.generator import QuestionType, detect_lang
 from src.loaders import load_text
 from src.pipeline import generate_from_document
 
-ProviderChoice = str
-
-PROVIDER_OPTIONS: dict[ProviderChoice, str] = {
-    "deepseek": "الافتراضي",
-    "groq": "احتياطي",
-}
-DEFAULT_PROVIDER: ProviderChoice = "deepseek"
 DIFFICULTY = "Hard"
 QUESTION_TYPES: list[QuestionType] = ["mcq"]
 MATH_FOCUS = True
@@ -107,10 +97,6 @@ def _read_secret(name: str) -> str | None:
 
 def get_deepseek_api_key() -> str | None:
     return _read_secret("DEEPSEEK_API_KEY")
-
-
-def get_groq_api_key() -> str | None:
-    return _read_secret("GROQ_API_KEY")
 
 
 def init_state() -> None:
@@ -223,13 +209,8 @@ def make_pipeline_progress_ui():
 
     return callback, progress_bar
 
-def render_provider_status(selected_provider: ProviderChoice) -> None:
-    key_ok = (
-        get_deepseek_api_key()
-        if selected_provider == "deepseek"
-        else get_groq_api_key()
-    )
-    if key_ok:
+def render_provider_status() -> None:
+    if get_deepseek_api_key():
         return
     st.markdown(
         '<div class="model-status">⚠️ خدمة التوليد غير مهيّأة. '
@@ -294,34 +275,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-selected_provider: ProviderChoice = DEFAULT_PROVIDER
-if SHOW_ALTERNATE_LLM_PROVIDERS:
-    selected_provider = st.radio(
-        "مصدر التوليد",
-        options=list(PROVIDER_OPTIONS.keys()),
-        index=list(PROVIDER_OPTIONS.keys()).index(DEFAULT_PROVIDER),
-        format_func=lambda key: PROVIDER_OPTIONS[key],
-        horizontal=True,
-    )
-
-render_provider_status(selected_provider)
+render_provider_status()
 
 uploaded = st.file_uploader("PDF / DOCX / TXT", type=["pdf", "docx", "txt"], label_visibility="collapsed")
 
 if st.button("توليد الأسئلة", type="primary", use_container_width=True):
-    deepseek_key = get_deepseek_api_key()
-    groq_key = get_groq_api_key()
-
-    if selected_provider == "deepseek":
-        api_key = deepseek_key
-        if not api_key:
-            st.error("خدمة التوليد غير مهيّأة. تواصل مع مسؤول النظام.")
-            st.stop()
-    else:
-        api_key = groq_key
-        if not api_key:
-            st.error("خدمة التوليد غير مهيّأة. تواصل مع مسؤول النظام.")
-            st.stop()
+    api_key = get_deepseek_api_key()
+    if not api_key:
+        st.error("خدمة التوليد غير مهيّأة. تواصل مع مسؤول النظام.")
+        st.stop()
 
     if not uploaded:
         st.error("يرجى رفع ملف PDF أو DOCX أو TXT.")
@@ -358,7 +320,7 @@ if st.button("توليد الأسئلة", type="primary", use_container_width=Tr
                     difficulty=DIFFICULTY,
                     types=QUESTION_TYPES,
                     model="",
-                    provider=selected_provider,
+                    provider="deepseek",
                     api_key=api_key,
                     math_focus=MATH_FOCUS,
                     dl_focus=DL_FOCUS,
@@ -377,9 +339,9 @@ if st.button("توليد الأسئلة", type="primary", use_container_width=Tr
                         "تعذّر توليد أسئلة من جميع أجزاء المستند. "
                         "جرّب ملفاً أصغر أو حاول لاحقاً."
                     )
-                elif message in {GROQ_LIMIT_ERROR, LLM_LIMIT_ERROR}:
+                elif message == LLM_LIMIT_ERROR:
                     st.error("تم استنفاد الحد المتاح. حاول لاحقاً.")
-                elif message in {GROQ_REQUEST_TOO_LARGE, LLM_REQUEST_TOO_LARGE}:
+                elif message == LLM_REQUEST_TOO_LARGE:
                     st.error(
                         "تعذّر معالجة بعض أجزاء المستند. "
                         "جرّب مرة أخرى — النظام يقسّم المستند تلقائياً."

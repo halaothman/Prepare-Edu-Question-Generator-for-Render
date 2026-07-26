@@ -16,9 +16,7 @@ from typing import Any
 
 from .chunking import build_logical_segments
 from .config import (
-    AUTO_FALLBACK_TO_GROQ,
     DEFAULT_DEEPSEEK_MODEL,
-    DEFAULT_GROQ_MODEL,
     DEFAULT_HF_MODEL,
     DEFAULT_OLLAMA_MODEL,
     LLM_INSUFFICIENT_BALANCE,
@@ -43,7 +41,6 @@ def _resolve_model_id(provider: str, model: str) -> str:
         return model
     defaults = {
         "deepseek": DEFAULT_DEEPSEEK_MODEL,
-        "groq": DEFAULT_GROQ_MODEL,
         "ollama": DEFAULT_OLLAMA_MODEL,
         "huggingface": DEFAULT_HF_MODEL,
     }
@@ -160,78 +157,18 @@ def _generate_segment_payload(
         return None
 
 
-def _generate_segment_with_fallback(
-    segment: str,
-    lang: Lang,
-    difficulty: Difficulty,
-    types: list[QuestionType],
-    num_questions: int | None,
-    model: str,
-    provider: str,
-    api_key: str | None,
-    math_focus: bool,
-    dl_focus: bool,
-    *,
-    fallback_provider: str | None,
-    fallback_api_key: str | None,
-    active: dict[str, object],
-) -> dict | None:
-    try:
-        return _generate_segment_payload(
-            segment,
-            lang,
-            difficulty,
-            types,
-            num_questions,
-            model,
-            str(active["provider"]),
-            str(active["api_key"]) if active["api_key"] else None,
-            math_focus,
-            dl_focus,
-        )
-    except RuntimeError as exc:
-        message = str(exc)
-        if message not in _PROVIDER_LIMIT_ERRORS:
-            raise
-        if message == LLM_INSUFFICIENT_BALANCE and active["provider"] == provider:
-            active["primary_balance_exhausted"] = True
-        if (
-            not fallback_provider
-            or not fallback_api_key
-            or active["provider"] == fallback_provider
-        ):
-            raise
-        active["provider"] = fallback_provider
-        active["api_key"] = fallback_api_key
-        active["fallback_used"] = True
-        return _generate_segment_payload(
-            segment,
-            lang,
-            difficulty,
-            types,
-            num_questions,
-            model,
-            fallback_provider,
-            fallback_api_key,
-            math_focus,
-            dl_focus,
-        )
-
-
 def generate_from_document(
     text: str,
     lang: Lang,
     difficulty: Difficulty,
     types: list[QuestionType],
     num_questions: int | None = None,
-    model: str = DEFAULT_HF_MODEL,
-    provider: str = "huggingface",
+    model: str = "",
+    provider: str = "deepseek",
     api_key: str | None = None,
     math_focus: bool = False,
     dl_focus: bool = False,
     *,
-    fallback_provider: str | None = None,
-    fallback_api_key: str | None = None,
     progress_callback: PipelineProgressCallback | None = None,
     target_questions: int | None = None,
     target_computation_min: int | None = None,
@@ -283,18 +220,10 @@ def generate_from_document(
     active: dict[str, object] = {
         "provider": provider,
         "api_key": api_key,
-        "fallback_used": False,
-        "primary_balance_exhausted": False,
     }
 
     per_segment_counts = distribute_question_counts(question_budget, len(segments))
     segment_jobs = list(zip(segments, per_segment_counts))
-
-    use_fallback = (
-        AUTO_FALLBACK_TO_GROQ
-        and bool(fallback_provider)
-        and bool(fallback_api_key)
-    )
 
     total_jobs = len(segment_jobs)
 
@@ -313,35 +242,18 @@ def generate_from_document(
             segment_chars=len(segment),
             segment_questions=segment_count,
         )
-        if use_fallback:
-            payload = _generate_segment_with_fallback(
-                segment,
-                lang,
-                difficulty,
-                types,
-                segment_count,
-                model,
-                provider,
-                api_key,
-                math_focus,
-                dl_focus,
-                fallback_provider=fallback_provider,
-                fallback_api_key=fallback_api_key,
-                active=active,
-            )
-        else:
-            payload = _generate_segment_payload(
-                segment,
-                lang,
-                difficulty,
-                types,
-                segment_count,
-                model,
-                str(active["provider"]),
-                str(active["api_key"]) if active["api_key"] else None,
-                math_focus,
-                dl_focus,
-            )
+        payload = _generate_segment_payload(
+            segment,
+            lang,
+            difficulty,
+            types,
+            segment_count,
+            model,
+            str(active["provider"]),
+            str(active["api_key"]) if active["api_key"] else None,
+            math_focus,
+            dl_focus,
+        )
         if payload is not None:
             payloads.append(payload)
             _emit_progress(
@@ -364,8 +276,6 @@ def generate_from_document(
             )
 
     if not payloads:
-        if active.get("primary_balance_exhausted"):
-            raise RuntimeError(LLM_INSUFFICIENT_BALANCE)
         raise RuntimeError(PIPELINE_ALL_SEGMENTS_FAILED)
 
     mcq_before_merge = sum(len(p.get("mcq", [])) for p in payloads)
@@ -395,10 +305,6 @@ def generate_from_document(
         "target_computation_min": computation_goal,
         "target_analysis_application_min": TARGET_ANALYSIS_APPLICATION_MIN,
         "provider_used": provider_used,
-        "primary_provider": provider,
-        "fallback_provider": fallback_provider,
-        "fallback_used": bool(active["fallback_used"]),
-        "primary_balance_exhausted": bool(active.get("primary_balance_exhausted")),
     }
     active_api_key = active["api_key"]
     filtered = filter_payload(
@@ -431,6 +337,5 @@ def generate_from_document(
         mcq_final=mcq_final,
         provider_used=provider_used,
         segments_skipped=segments_skipped,
-        fallback_used=bool(active["fallback_used"]),
     )
     return capped, meta

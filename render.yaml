@@ -28,13 +28,7 @@ services:
         value: deepseek
       - key: DEEPSEEK_MODEL
         value: deepseek-chat
-      - key: AUTO_FALLBACK_TO_GROQ
-        value: "false"
-      - key: SHOW_ALTERNATE_LLM_PROVIDERS
-        value: "false"
       - key: TARGET_QUESTIONS_TOTAL
         value: "20"
       - key: DEEPSEEK_API_KEY
-        sync: false
-      - key: GROQ_API_KEY
         sync: false

@@ -11,9 +11,6 @@ from .config import (
     DEEPSEEK_BASE_URL,
     DEEPSEEK_REASONER_MAX_TOKENS,
     DEFAULT_DEEPSEEK_MODEL,
-    GROQ_BASE_URL,
-    GROQ_MAX_COMPLETION_TOKENS,
-    GROQ_MODEL_CHAIN,
     JSON_MODE_PROVIDERS,
     LLM_INSUFFICIENT_BALANCE,
     LLM_LIMIT_ERROR,
@@ -33,107 +30,9 @@ def _is_deepseek_reasoner(model_id: str) -> bool:
     return lowered in DEEPSEEK_REASONER_MODELS or "reasoner" in lowered
 
 
-GROQ_MODEL_LABELS = {
-    "qwen/qwen3.6-27b": "Qwen 3.6 27B",
-    "llama-3.1-8b-instant": "Llama 3.1 8B",
-}
-
-
-def _groq_completion_kwargs(
-    model_id: str,
-    messages: list[dict[str, str]],
-    *,
-    temperature: float,
-    max_tokens: int | None = None,
-    json_mode: bool = False,
-) -> dict:
-    kwargs: dict = {
-        "model": model_id,
-        "messages": messages,
-        "temperature": temperature,
-    }
-    if max_tokens is not None:
-        kwargs["max_tokens"] = max_tokens
-    if json_mode:
-        kwargs["response_format"] = {"type": "json_object"}
-    if model_id.startswith("qwen/"):
-        kwargs["reasoning_effort"] = "none"
-    return kwargs
-
 HF_CREDITS_ERROR = "HF_CREDITS_DEPLETED"
 HF_MODEL_UNSUPPORTED = "HF_MODEL_UNSUPPORTED"
 HF_ERROR = "HF_ERROR"
-
-
-def _parse_groq_rate_headers(headers: dict) -> tuple[int | None, int | None]:
-    remaining = headers.get("x-ratelimit-remaining-requests")
-    limit = headers.get("x-ratelimit-limit-requests")
-    return (
-        int(remaining) if remaining is not None else None,
-        int(limit) if limit is not None else None,
-    )
-
-
-def _check_groq_model_quota(client: OpenAI, model_id: str) -> dict:
-    label = GROQ_MODEL_LABELS.get(model_id, model_id)
-    entry: dict = {
-        "model_id": model_id,
-        "label": label,
-        "available": False,
-        "remaining_requests": None,
-        "limit_requests": None,
-        "error": None,
-    }
-    try:
-        response = client.chat.completions.with_raw_response.create(
-            **_groq_completion_kwargs(
-                model_id,
-                [{"role": "user", "content": "OK"}],
-                temperature=0.1,
-                max_tokens=1,
-            )
-        )
-        remaining, limit = _parse_groq_rate_headers(dict(response.headers))
-        entry["remaining_requests"] = remaining
-        entry["limit_requests"] = limit
-        entry["available"] = remaining is None or remaining > 0
-    except RateLimitError as exc:
-        entry["error"] = "limit"
-        response = getattr(exc, "response", None)
-        if response is not None:
-            remaining, limit = _parse_groq_rate_headers(dict(response.headers))
-            entry["remaining_requests"] = remaining
-            entry["limit_requests"] = limit
-    except APIStatusError as exc:
-        if exc.status_code == 429:
-            entry["error"] = "limit"
-            response = getattr(exc, "response", None)
-            if response is not None:
-                remaining, limit = _parse_groq_rate_headers(dict(response.headers))
-                entry["remaining_requests"] = remaining
-                entry["limit_requests"] = limit
-        else:
-            entry["error"] = str(exc)
-    except Exception as exc:
-        entry["error"] = str(exc)
-    return entry
-
-
-def groq_quota_status(api_key: str | None) -> dict:
-    if not api_key:
-        return {"ok": False, "error": "no_key", "models": []}
-
-    client = OpenAI(base_url=GROQ_BASE_URL, api_key=api_key)
-    models = [_check_groq_model_quota(client, model_id) for model_id in GROQ_MODEL_CHAIN]
-    any_available = any(model["available"] for model in models)
-    all_limit = bool(models) and all(model.get("error") == "limit" for model in models)
-
-    return {
-        "ok": True,
-        "models": models,
-        "any_available": any_available,
-        "all_limit": all_limit and not any_available,
-    }
 
 
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
@@ -173,51 +72,9 @@ def deepseek_balance_status(api_key: str | None) -> dict:
     }
 
 
-def _groq_chat(
-    messages: list[dict[str, str]],
-    api_key: str | None,
-    temperature: float,
-    *,
-    max_tokens: int | None = None,
-    json_mode: bool = False,
-) -> str:
-    client = OpenAI(
-        base_url=GROQ_BASE_URL,
-        api_key=api_key or os.getenv("GROQ_API_KEY", ""),
-    )
-    last_error: Exception | None = None
-    for groq_model in GROQ_MODEL_CHAIN:
-        try:
-            response = client.chat.completions.create(
-                **_groq_completion_kwargs(
-                    groq_model,
-                    messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    json_mode=json_mode,
-                )
-            )
-            return response.choices[0].message.content or "{}"
-        except RateLimitError as exc:
-            last_error = exc
-        except APIStatusError as exc:
-            if exc.status_code in (413, 429):
-                last_error = exc
-            else:
-                raise
-    if isinstance(last_error, APIStatusError) and last_error.status_code == 413:
-        raise RuntimeError(LLM_REQUEST_TOO_LARGE) from last_error
-    raise RuntimeError(LLM_LIMIT_ERROR) from last_error
-
-
 def create_llm_client(provider: Provider, api_key: str | None = None) -> OpenAI:
     if provider == "ollama":
         return OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
-    if provider == "groq":
-        return OpenAI(
-            base_url=GROQ_BASE_URL,
-            api_key=api_key or os.getenv("GROQ_API_KEY", ""),
-        )
     if provider == "deepseek":
         return OpenAI(
             base_url=DEEPSEEK_BASE_URL,
@@ -309,15 +166,6 @@ def chat_complete(
                 raise RuntimeError(HF_MODEL_UNSUPPORTED) from exc
             raise RuntimeError(HF_ERROR) from exc
         return response.choices[0].message.content or "{}"
-
-    if provider == "groq":
-        return _groq_chat(
-            messages,
-            api_key,
-            temperature,
-            max_tokens=max_tokens or (GROQ_MAX_COMPLETION_TOKENS if json_mode else None),
-            json_mode=json_mode,
-        )
 
     if provider in {"openai", "deepseek", "ollama"}:
         resolved_model = model

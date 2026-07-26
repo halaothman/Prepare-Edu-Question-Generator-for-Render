@@ -8,7 +8,6 @@ from .qwen import build_qwen_prompt
 PromptFamily = str
 
 PROMPT_PROVIDER_MAP: dict[str, PromptFamily] = {
-    "groq": "qwen",
     "deepseek": "deepseek",
     "openai": "openai",
     "huggingface": "qwen",
